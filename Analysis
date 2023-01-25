@@ -1,0 +1,198 @@
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(tidyverse, ggplot2, dplyr, lubridate, readr, readxl, hrbrthemes,
+               scales, plotly, gganimate, cobalt, ivpack, stargazer, haven, ggthemes,
+               gifski, magick, lfe, dotwhisker, here, fixest, modelsummary)
+
+insurance <- readRDS("/Users/rachelling/Downloads/insurance.rds")
+
+acs_medicaid <- readRDS("/Users/rachelling/Downloads/acs_medicaid.rds")
+
+ins.dat <- acs_medicaid %>%
+  mutate(perc_private = (ins_employer + ins_direct)/adult_pop,
+         perc_public = (ins_medicare + ins_medicaid)/adult_pop,
+         perc_ins = (adult_pop - uninsured)/adult_pop,
+         perc_unins = uninsured/adult_pop,
+         perc_employer = ins_employer/adult_pop,
+         perc_medicaid = ins_medicaid/adult_pop,
+         perc_medicare = ins_medicare/adult_pop,
+         perc_direct = ins_direct/adult_pop)
+# Summarize the Data
+##Question 1
+direct_share <- acs_medicaid %>% 
+group_by(year) %>% 
+  summarize(ds=sum(ins_direct)/sum(adult_pop))
+direct_share_plot <- ggplot(direct_share, aes(x=year, y=ds)) +
+  geom_line() + ylab("Share") + ggtitle("Share of Insured Individuals with Direct Purchase Health Insurance over Time") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+##Question 3
+med_share <- acs_medicaid %>% 
+  group_by(year) %>% 
+  summarize(ms=sum(ins_medicaid)/sum(adult_pop))
+med_share_plot <- ggplot(med_share, aes(x=year, y=ms)) +
+  geom_line() + ylab("Share") + ggtitle("Share of Insured Individuals with Medicaid over Time") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+##Question 4
+insurance_2014 <- ins.dat %>% 
+  mutate(post = (year>=2014), treat=post*expand_ever) %>%
+  filter(is.na(expand_year) | expand_year==2014) %>%
+  group_by(expand_ever, year) %>% 
+  mutate(mean=mean(perc_unins))
+  
+ 
+Uninsured_share_plot <- ggplot(data=insurance_2014, aes(x=year,y=mean,group=expand_ever, linetype=expand_ever)) + 
+  geom_line() +
+  labs(
+    x="Year",
+    y="Fraction Uninsured",
+    title="Share of Uninsured over Time"
+  ) +   theme(plot.title = element_text(hjust = 0.5))
+Uninsured_share_plot
+# Estimating ATEs
+##Question 1
+
+dd.means <- ins.dat %>% 
+ group_by(expand_ever, year) %>% 
+  summarize(means = mean(perc_unins)) %>%
+filter(year=="2012" | year=="2015") %>%
+ na.omit
+ table1 <- knitr::kable(dd.means, col.names=c("Treated","Year","Mean"))
+
+## Question 2
+ dd.est <- lm(perc_unins ~ post + expand_ever + treat, data=insurance_2014)
+ summary(dd.est)
+ 
+## Question 3
+ twfe1 <- insurance_2014 %>% 
+   filter(!is.na(expand_ever)) %>%
+   mutate(post = (year>=2014), 
+          treat=post*expand_ever,
+          time_to_treat = ifelse(expand_ever==FALSE, 0, year-expand_year),
+          time_to_treat = ifelse(time_to_treat < -3, -3, time_to_treat))
+ expansion_2014 <- feols(perc_unins~i(time_to_treat, expand_ever, ref=-1) | State + year,
+                   cluster=~State,
+                   data=twfe1)
+summary(expansion_2014)
+
+##Question 4
+twfe2 <- ins.dat %>% 
+  filter(!is.na(expand_ever)) %>%
+  mutate(post = (year>=2014), 
+         treat=post*expand_ever,
+         time_to_treat = ifelse(expand_ever==FALSE, 0, year-expand_year),
+         time_to_treat = ifelse(time_to_treat < -3, -3, time_to_treat))
+all_states <- feols(perc_unins~i(time_to_treat, expand_ever, ref=-1) | State + year,
+                  cluster=~State,
+                  data=twfe2)
+summary(all_states)
+
+## Question 5
+event.dat <- insurance_2014 %>%
+  mutate(expand_2012 = expand_ever*(year==2012),
+         expand_2013 = expand_ever*(year==2013),
+         expand_2014 = expand_ever*(year==2014),
+         expand_2015 = expand_ever*(year==2015),
+         expand_2016 = expand_ever*(year==2016),
+         expand_2017 = expand_ever*(year==2017),
+         expand_2018 = expand_ever*(year==2018))
+event.ins.reg <- lm(perc_unins ~ expand_2012 + expand_2014 + 
+                      expand_2015 + expand_2016 + expand_2017 + 
+                      expand_2018 + factor(year) + factor(State), data=event.dat)
+point.est <- as_tibble(c(event.ins.reg$coefficients[c("expand_2012","expand_2014","expand_2015",
+                                                      "expand_2016","expand_2017","expand_2018")]),
+                       rownames = "term")
+ci.est <- as_tibble(confint(event.ins.reg)[c("expand_2012","expand_2014","expand_2015",
+                                             "expand_2016","expand_2017","expand_2018"),],
+                    rownames = "term")
+
+point.est <- point.est %>% rename(estimate = value)
+ci.est <- ci.est %>% rename(conf.low = `2.5 %`, conf.high = `97.5 %`)
+new.row <- tibble(
+  term = "expand_2013",
+  estimate = 0,
+  conf.low = 0,
+  conf.high = 0,
+  year = 2013
+)
+event.plot.dat <- point.est %>%
+  left_join(ci.est, by=c("term")) %>%
+  mutate(year = c(2012, 2014, 2015, 2016, 2017, 2018)) %>%
+  bind_rows(new.row) %>%
+  arrange(year)
+
+event_plot1 <- dwplot(event.plot.dat, 
+       vline=geom_vline(xintercept=0, linetype=2), 
+       vars_order = c("expand_2018","expand_2017","expand_2016",
+                      "expand_2015","expand_2014","expand_2013",
+                      "expand_2012"),
+       whisker_args = list(color="black", size=1.1),
+       dot_args = list(color="black")) + 
+  coord_flip() + theme_bw() + theme(legend.position = "none") +
+  labs(y = "Year",
+       x = "Estimate",
+       title = "Event Study for states expanded in 2014 or never expanded") +
+  scale_y_discrete(labels = c("expand_2012" = "2012", 
+                              "expand_2013" = "2013",
+                              "expand_2014" = "2014",
+                              "expand_2015" = "2015",
+                              "expand_2016" = "2016",
+                              "expand_2017" = "2017",
+                              "expand_2018" = "2018")) +
+  theme(plot.title = element_text(hjust = 0.5))
+## Question 6
+event.dat <- ins.dat %>%
+  mutate(expand_2012 = expand_ever*(year==2012),
+         expand_2013 = expand_ever*(year==2013),
+         expand_2014 = expand_ever*(year==2014),
+         expand_2015 = expand_ever*(year==2015),
+         expand_2016 = expand_ever*(year==2016),
+         expand_2017 = expand_ever*(year==2017),
+         expand_2018 = expand_ever*(year==2018))
+event.ins.reg <- lm(perc_unins ~ expand_2012 + expand_2014 + 
+                      expand_2015 + expand_2016 + expand_2017 + 
+                      expand_2018 + factor(year) + factor(State), data=event.dat)
+point.est <- as_tibble(c(event.ins.reg$coefficients[c("expand_2012","expand_2014","expand_2015",
+                                                      "expand_2016","expand_2017","expand_2018")]),
+                       rownames = "term")
+ci.est <- as_tibble(confint(event.ins.reg)[c("expand_2012","expand_2014","expand_2015",
+                                             "expand_2016","expand_2017","expand_2018"),],
+                    rownames = "term") 
+
+point.est <- point.est %>% rename(estimate = value)
+ci.est <- ci.est %>% rename(conf.low = `2.5 %`, conf.high = `97.5 %`)
+new.row <- tibble(
+  term = "expand_2013",
+  estimate = 0,
+  conf.low = 0,
+  conf.high = 0,
+  year = 2013
+)
+event.plot.dat <- point.est %>%
+  left_join(ci.est, by=c("term")) %>%
+  mutate(year = c(2012, 2014, 2015, 2016, 2017, 2018)) %>%
+  bind_rows(new.row) %>%
+  arrange(year)
+
+event_plot2 <- dwplot(event.plot.dat, 
+       vline=geom_vline(xintercept=0, linetype=2), 
+       vars_order = c("expand_2018","expand_2017","expand_2016",
+                      "expand_2015","expand_2014","expand_2013",
+                      "expand_2012"),
+       whisker_args = list(color="black", size=1.1),
+       dot_args = list(color="black")) + 
+  coord_flip() + theme_bw() + theme(legend.position = "none") +
+  labs(y = "Year",
+       x = "Estimate",
+       title = "Event Study for all states that expanded") +
+  scale_y_discrete(labels = c("expand_2012" = "2012", 
+                              "expand_2013" = "2013",
+                              "expand_2014" = "2014",
+                              "expand_2015" = "2015",
+                              "expand_2016" = "2016",
+                              "expand_2017" = "2017",
+                              "expand_2018" = "2018")) +
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+save.image("analysis.RData")
